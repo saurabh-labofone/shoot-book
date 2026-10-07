@@ -1,8 +1,9 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#0A0A0B"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Shoot Book">
+<meta name="theme-color" content="#F5F3EE" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0A0A0B" media="(prefers-color-scheme: dark)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="Shoot Book">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="preconnect" href="https://tedmmyvztihdelsbcmvy.supabase.co">
 <link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon-180.png"><link rel="icon" href="icon-180.png">
 <style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui;-webkit-text-size-adjust:100%}img{max-width:100%}[hidden]{display:none!important}</style>
 <script>/* Shoot Book data layer: Supabase RPC + phone cache + offline write queue.
@@ -10,23 +11,22 @@
 (function(){
   const SB='https://tedmmyvztihdelsbcmvy.supabase.co', ANON='sb_publishable_tqKPDZBT3jgRdp1Z8QNOdw_QBhYQ8s9', BOOK='nina-2026';
   const ls={get(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
-  const m=/[#&]k=([A-Za-z0-9]+)/.exec(location.hash); if(m) ls.set('sb.key',m[1]);
-  let key=ls.get('sb.key',''), cache=ls.get('sb.cache',{}), queue=ls.get('sb.queue',[]), lastSeen=ls.get('sb.seen',''), subs=[], lastEmit='', pulling=false, flushing=false, state='';
+  try{localStorage.removeItem('sb.key')}catch(e){}
+  if(/[#&]k=/.test(location.hash)) history.replaceState(null,'',location.pathname+location.search);
+  let cache=ls.get('sb.cache',{}), queue=ls.get('sb.queue',[]), lastSeen=ls.get('sb.seen',''), subs=[], lastEmit='', pulling=false, flushing=false, state='';
   const pill=document.createElement('div'); pill.id='sync'; document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(pill)); if(document.body) document.body.appendChild(pill);
   function show(){
     const n=queue.length, off=!navigator.onLine;
     let t='', c='';
-    if(state==='badkey'){t='Key not accepted';c='bad'}
-    else if(n){t=(off?'Offline · ':'Saving · ')+n+' change'+(n>1?'s':'')+' waiting';c='wait'}
+    if(n){t=(off?'Offline · ':'Saving · ')+n+' change'+(n>1?'s':'')+' waiting';c='wait'}
     else if(off){t='Offline · works from this phone';c='wait'}
     else if(state==='err'){t='Server not reached · retrying';c='wait'}
-    else if(lastSeen){t='Synced '+new Date(lastSeen).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});c='ok'}
     pill.textContent=t; pill.className=c; pill.hidden=!t;
   }
   async function rpc(fn,body){
-    const r=await fetch(SB+'/rest/v1/rpc/'+fn,{method:'POST',cache:'no-store',headers:{apikey:ANON,Authorization:'Bearer '+ANON,'Content-Type':'application/json'},body:JSON.stringify(Object.assign({k:key,b:BOOK},body))});
-    if(r.status===403){ state='badkey'; show(); keyScreen('That key did not work. Paste the full link or the key again.'); throw {code:'bad_key'} }
-    if(!r.ok) throw {code:'net',status:r.status};
+    const ac=new AbortController(), to=setTimeout(()=>ac.abort(),12000);
+    const r=await fetch(SB+'/rest/v1/rpc/'+fn,{method:'POST',cache:'no-store',signal:ac.signal,headers:{apikey:ANON,Authorization:'Bearer '+ANON,'Content-Type':'application/json'},body:JSON.stringify(Object.assign({k:'',b:BOOK},body))});
+    clearTimeout(to); if(!r.ok) throw {code:'net',status:r.status};
     const t=await r.text(); return t?JSON.parse(t):null;
   }
   function view(){ // server copy + writes that are still waiting
@@ -44,14 +44,14 @@
     subs.forEach(f=>{try{f(snap)}catch(e){console.error(e)}});
   }
   async function pull(){
-    if(pulling||!key||!navigator.onLine) { show(); return; } pulling=true;
+    if(pulling||!navigator.onLine) { show(); return; } pulling=true;
     try{ const rows=await rpc('shoot_list',{}); const c={}; for(const r of rows) c[r.id]=r.data; cache=c; ls.set('sb.cache',cache);
-      lastSeen=new Date().toISOString(); ls.set('sb.seen',lastSeen); if(state!=='badkey') state=''; emit(); }
-    catch(e){ if(e.code!=='bad_key') state='err'; }
+      lastSeen=new Date().toISOString(); ls.set('sb.seen',lastSeen); state=''; emit(); }
+    catch(e){ state='err'; }
     finally{ pulling=false; show(); }
   }
   async function flush(){
-    if(flushing||!key) return; flushing=true;
+    if(flushing) return; flushing=true;
     try{
       while(queue.length && navigator.onLine){
         const w=queue[0];
@@ -59,7 +59,7 @@
           if(w.op==='put') await rpc('shoot_put',{rid:w.id,d:w.data});
           else if(w.op==='patch') await rpc('shoot_patch',{rid:w.id,p:w.data});
           else await rpc('shoot_del',{rid:w.id});
-        }catch(e){ state=e.code==='bad_key'?'badkey':'err'; break; }
+        }catch(e){ state='err'; break; }
         // fold the write into the server copy so the view stays the same
         if(w.op==='del') delete cache[w.id]; else if(w.op==='put') cache[w.id]=w.data; else if(cache[w.id]) cache[w.id]=Object.assign({},cache[w.id],w.data);
         queue.shift(); ls.set('sb.queue',queue); ls.set('sb.cache',cache); state='';
@@ -74,18 +74,8 @@
     else queue.push({op,id,data:data||null,at:Date.now()});
     ls.set('sb.queue',queue); emit(true); show(); flush(); return Promise.resolve();
   }
-  function keyScreen(msg){
-    let el=document.getElementById('keyScreen'); if(el){ el.querySelector('p.msg').textContent=msg||''; return; }
-    el=document.createElement('div'); el.id='keyScreen';
-    el.innerHTML='<form><h2>Shoot Book</h2><p>Paste the link or the key from your ACCESS note. You do this once on each phone.</p><input autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Link or key" aria-label="Link or key"><button class="btn" type="submit">Open</button><p class="msg"></p></form>';
-    document.body.appendChild(el); el.querySelector('p.msg').textContent=msg||'';
-    el.querySelector('form').onsubmit=e=>{ e.preventDefault(); const v=el.querySelector('input').value.trim(); const mm=/k=([A-Za-z0-9]+)/.exec(v); const k=mm?mm[1]:v.replace(/[^A-Za-z0-9]/g,'');
-      if(!k) return; key=k; ls.set('sb.key',k); state=''; if(!/[#&]k=/.test(location.hash)) history.replaceState(null,'',location.pathname+location.search+'#k='+k); el.remove(); keyWaiters.splice(0).forEach(f=>f()); pull(); flush(); };
-  }
-  const keyWaiters=[];
   window.SB={
     async db(){
-      if(!key){ keyScreen(''); await new Promise(r=>keyWaiters.push(r)); }
       return {
         doc(path){ const id=path.split('/')[1]; return { set:d=>enqueue('put',id,d), update:p=>enqueue('patch',id,p), delete:()=>enqueue('del',id) }; },
         collection(){ return { onSnapshot(fn){ subs.push(fn); if(Object.keys(view()).length) emit(true); pull(); flush(); return ()=>{subs=subs.filter(f=>f!==fn)}; } }; }
@@ -223,13 +213,26 @@
   .sheet .solo{font-size:13.5px;color:var(--mute);margin-top:12px}
   .setbtn:focus-visible,.setimg:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   @media (prefers-reduced-motion: reduce){ .bar i{transition:none} }
-  #sync{position:fixed;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:60;font:500 12px/1 var(--body);padding:7px 10px;border-radius:999px;background:var(--card);color:var(--mute);border:1px solid var(--line);pointer-events:none}
-  #sync.wait{color:var(--take);border-color:var(--take)} #sync.bad{color:var(--bad);border-color:var(--bad)} #sync.ok{opacity:.8}
-  #keyScreen{position:fixed;inset:0;z-index:80;background:var(--bg);display:grid;place-items:center;padding:24px 16px}
-  #keyScreen form{display:grid;gap:12px;width:min(420px,100%)}
-  #keyScreen h2{font:400 44px/1 var(--display);margin:0} #keyScreen p{margin:0;color:var(--mute);font-size:15px}
-  #keyScreen input{font:16px var(--body);padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg)}
-  #keyScreen .msg{color:var(--bad)}
+  /* phone app layer */
+  html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+  body{overscroll-behavior-y:none;-webkit-tap-highlight-color:transparent}
+  button,.btn,.chip,.box,label,a,[data-setup],.q .t,.arrow{touch-action:manipulation}
+  /* 16px on every field stops iPhone from zooming in on tap */
+  .tools input[type=search],.add input,.sheet textarea,.sheet select,#keyScreen input{font-size:16px}
+  .tools label{font-size:14px;min-height:36px}
+  .tools input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
+  .btn{min-height:44px;padding-inline:16px}
+  .sheet .x{min-width:44px;min-height:44px}
+  .sheet{max-height:92dvh;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;animation:sbUp .18s ease-out}
+  .veil{animation:sbFade .18s ease-out}
+  @keyframes sbUp{from{transform:translateY(24px);opacity:.6}to{transform:none;opacity:1}}
+  @keyframes sbFade{from{opacity:0}to{opacity:1}}
+  @media (prefers-reduced-motion: reduce){.sheet,.veil{animation:none}}
+  .sheet img,.q img{background:var(--soft)}
+  .wrap{padding-bottom:calc(90px + env(safe-area-inset-bottom,0px))}
+  .chips{scrollbar-width:none} .chips::-webkit-scrollbar{display:none}
+  #sync{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:60;font:500 13px/1 var(--body);padding:9px 14px;border-radius:999px;background:var(--hud);color:var(--hudfg);pointer-events:none;box-shadow:0 4px 18px rgba(0,0,0,.25)}
+  #sync.wait{color:var(--hudv)}
 </style>
 
 <div class="wrap">
