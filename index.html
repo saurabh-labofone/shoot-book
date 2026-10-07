@@ -1,0 +1,669 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0A0A0B"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Shoot Book">
+<link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon-180.png"><link rel="icon" href="icon-180.png">
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui;-webkit-text-size-adjust:100%}img{max-width:100%}[hidden]{display:none!important}</style>
+<script>/* Shoot Book data layer: Supabase RPC + phone cache + offline write queue.
+   Same shape as the artifact db the page was written for: doc(path).set/update/delete, collection().onSnapshot. */
+(function(){
+  const SB='https://tedmmyvztihdelsbcmvy.supabase.co', ANON='sb_publishable_tqKPDZBT3jgRdp1Z8QNOdw_QBhYQ8s9', BOOK='nina-2026';
+  const ls={get(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+  const m=/[#&]k=([A-Za-z0-9]+)/.exec(location.hash); if(m) ls.set('sb.key',m[1]);
+  let key=ls.get('sb.key',''), cache=ls.get('sb.cache',{}), queue=ls.get('sb.queue',[]), lastSeen=ls.get('sb.seen',''), subs=[], lastEmit='', pulling=false, flushing=false, state='';
+  const pill=document.createElement('div'); pill.id='sync'; document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(pill)); if(document.body) document.body.appendChild(pill);
+  function show(){
+    const n=queue.length, off=!navigator.onLine;
+    let t='', c='';
+    if(state==='badkey'){t='Key not accepted';c='bad'}
+    else if(n){t=(off?'Offline · ':'Saving · ')+n+' change'+(n>1?'s':'')+' waiting';c='wait'}
+    else if(off){t='Offline · works from this phone';c='wait'}
+    else if(state==='err'){t='Server not reached · retrying';c='wait'}
+    else if(lastSeen){t='Synced '+new Date(lastSeen).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});c='ok'}
+    pill.textContent=t; pill.className=c; pill.hidden=!t;
+  }
+  async function rpc(fn,body){
+    const r=await fetch(SB+'/rest/v1/rpc/'+fn,{method:'POST',cache:'no-store',headers:{apikey:ANON,Authorization:'Bearer '+ANON,'Content-Type':'application/json'},body:JSON.stringify(Object.assign({k:key,b:BOOK},body))});
+    if(r.status===403){ state='badkey'; show(); keyScreen('That key did not work. Paste the full link or the key again.'); throw {code:'bad_key'} }
+    if(!r.ok) throw {code:'net',status:r.status};
+    const t=await r.text(); return t?JSON.parse(t):null;
+  }
+  function view(){ // server copy + writes that are still waiting
+    const v=Object.assign({},cache);
+    for(const w of queue){ if(w.op==='del') delete v[w.id]; else if(w.op==='put') v[w.id]=w.data; else if(v[w.id]) v[w.id]=Object.assign({},v[w.id],w.data); }
+    return v;
+  }
+  function busy(){ const a=document.activeElement; return a && (a.closest('#sheetRoot') || a.tagName==='INPUT' && a.type!=='checkbox' && a.value); }
+  function emit(force){
+    const v=view(), s=JSON.stringify(v);
+    if(!force && s===lastEmit) return;
+    if(!force && busy()){ setTimeout(()=>emit(), 2500); return; }
+    lastEmit=s;
+    const snap={docs:Object.keys(v).map(id=>({id,exists:true,data:()=>JSON.parse(JSON.stringify(v[id]))}))};
+    subs.forEach(f=>{try{f(snap)}catch(e){console.error(e)}});
+  }
+  async function pull(){
+    if(pulling||!key||!navigator.onLine) { show(); return; } pulling=true;
+    try{ const rows=await rpc('shoot_list',{}); const c={}; for(const r of rows) c[r.id]=r.data; cache=c; ls.set('sb.cache',cache);
+      lastSeen=new Date().toISOString(); ls.set('sb.seen',lastSeen); if(state!=='badkey') state=''; emit(); }
+    catch(e){ if(e.code!=='bad_key') state='err'; }
+    finally{ pulling=false; show(); }
+  }
+  async function flush(){
+    if(flushing||!key) return; flushing=true;
+    try{
+      while(queue.length && navigator.onLine){
+        const w=queue[0];
+        try{
+          if(w.op==='put') await rpc('shoot_put',{rid:w.id,d:w.data});
+          else if(w.op==='patch') await rpc('shoot_patch',{rid:w.id,p:w.data});
+          else await rpc('shoot_del',{rid:w.id});
+        }catch(e){ state=e.code==='bad_key'?'badkey':'err'; break; }
+        // fold the write into the server copy so the view stays the same
+        if(w.op==='del') delete cache[w.id]; else if(w.op==='put') cache[w.id]=w.data; else if(cache[w.id]) cache[w.id]=Object.assign({},cache[w.id],w.data);
+        queue.shift(); ls.set('sb.queue',queue); ls.set('sb.cache',cache); state='';
+      }
+    } finally { flushing=false; show(); }
+    if(!queue.length) pull();
+  }
+  function enqueue(op,id,data){
+    // merge back-to-back patches on the same row, so an offline day stays a short list
+    const last=queue[queue.length-1];
+    if(op==='patch' && last && last.id===id && (last.op==='patch'||last.op==='put') && !flushing) Object.assign(last.data,data);
+    else queue.push({op,id,data:data||null,at:Date.now()});
+    ls.set('sb.queue',queue); emit(true); show(); flush(); return Promise.resolve();
+  }
+  function keyScreen(msg){
+    let el=document.getElementById('keyScreen'); if(el){ el.querySelector('p.msg').textContent=msg||''; return; }
+    el=document.createElement('div'); el.id='keyScreen';
+    el.innerHTML='<form><h2>Shoot Book</h2><p>Paste the link or the key from your ACCESS note. You do this once on each phone.</p><input autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Link or key" aria-label="Link or key"><button class="btn" type="submit">Open</button><p class="msg"></p></form>';
+    document.body.appendChild(el); el.querySelector('p.msg').textContent=msg||'';
+    el.querySelector('form').onsubmit=e=>{ e.preventDefault(); const v=el.querySelector('input').value.trim(); const mm=/k=([A-Za-z0-9]+)/.exec(v); const k=mm?mm[1]:v.replace(/[^A-Za-z0-9]/g,'');
+      if(!k) return; key=k; ls.set('sb.key',k); state=''; if(!/[#&]k=/.test(location.hash)) history.replaceState(null,'',location.pathname+location.search+'#k='+k); el.remove(); keyWaiters.splice(0).forEach(f=>f()); pull(); flush(); };
+  }
+  const keyWaiters=[];
+  window.SB={
+    async db(){
+      if(!key){ keyScreen(''); await new Promise(r=>keyWaiters.push(r)); }
+      return {
+        doc(path){ const id=path.split('/')[1]; return { set:d=>enqueue('put',id,d), update:p=>enqueue('patch',id,p), delete:()=>enqueue('del',id) }; },
+        collection(){ return { onSnapshot(fn){ subs.push(fn); if(Object.keys(view()).length) emit(true); pull(); flush(); return ()=>{subs=subs.filter(f=>f!==fn)}; } }; }
+      };
+    }
+  };
+  addEventListener('online',()=>{show();flush();pull()}); addEventListener('offline',show);
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'){ flush(); pull(); } });
+  setInterval(()=>{ if(document.visibilityState==='visible'){ flush(); pull(); } }, 20000);
+  if('serviceWorker' in navigator) addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+})();
+</script>
+</head><body>
+<title>Nina Question Bank</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&family=Inter+Tight:wght@400;500;600&family=Gloria+Hallelujah&display=swap">
+<style>
+  /* Layout: one column, sticky day strip, blocks in day order, tap-to-tick rows, a bottom sheet for the full text. Phone first. */
+  :root{
+    --bg:#F5F3EE; --fg:#0A0A0B; --mute:#6E6B66; --line:#D9D5CC; --card:#FFFFFF; --soft:#ECE9E1;
+    --accent:#4D6BFF; --done:#1E8E5A; --take:#C98A00; --bad:#C8321E; --hud:#0A0A0B; --hudfg:#F5F3EE; --hudv:#FFD15C;
+    --luna:#4D6BFF; --go:#D07A00; --fuji:#1E8E5A; --iph:#B0399A; --drn:#0E8FA8; --map:#ECE9E1; --mapline:#B9B4A8;
+    --display:"VT323",ui-monospace,monospace; --body:"Inter Tight",system-ui,-apple-system,sans-serif; --hand:"Gloria Hallelujah",cursive;
+  }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --bg:#0A0A0B; --fg:#F5F3EE; --mute:#9A9792; --line:#2A2A2E; --card:#141416; --soft:#1C1C1F; --accent:#7D93FF; --done:#3FBF7F; --take:#E0A83A; --bad:#E0604A; --hud:#1C1C1F; --hudfg:#F5F3EE; --hudv:#FFD15C; --luna:#7D93FF; --go:#F0A040; --fuji:#3FBF7F; --iph:#E070C8; --drn:#4CC3DA; --map:#1C1C1F; --mapline:#4A4A50; color-scheme:dark } }
+  :root[data-theme="dark"]{ --bg:#0A0A0B; --fg:#F5F3EE; --mute:#9A9792; --line:#2A2A2E; --card:#141416; --soft:#1C1C1F; --accent:#7D93FF; --done:#3FBF7F; --take:#E0A83A; --bad:#E0604A; --hud:#1C1C1F; --hudfg:#F5F3EE; --hudv:#FFD15C; --luna:#7D93FF; --go:#F0A040; --fuji:#3FBF7F; --iph:#E070C8; --drn:#4CC3DA; --map:#1C1C1F; --mapline:#4A4A50; color-scheme:dark }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:17px;line-height:1.4;margin:0}
+  .wrap{max-width:720px;margin:0 auto;padding-block:14px 90px;padding-inline:16px}
+  h1{font-family:var(--display);font-size:40px;line-height:.95;margin:0;text-transform:uppercase;letter-spacing:.01em;text-wrap:balance}
+  .sub{color:var(--mute);font-size:14px;margin:4px 0 12px}
+  .sub b{color:var(--fg);font-weight:500}
+  .status{font-family:var(--hand);color:var(--accent);font-size:15px;min-height:20px}
+
+  .strip{position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);z-index:5;padding-block:8px;margin-inline:-16px;padding-inline:16px;border-bottom:1px solid var(--line)}
+  .chips{display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;padding-bottom:4px}
+  .chips::-webkit-scrollbar{display:none}
+  .chip{flex:0 0 auto;border:1.5px solid var(--line);background:var(--card);color:var(--fg);border-radius:999px;padding:7px 12px;font:500 14px var(--body);display:flex;gap:7px;align-items:center;cursor:pointer}
+  .chip .n{font-family:var(--display);font-size:18px;line-height:1;color:var(--mute)}
+  .chip.on{border-color:var(--fg);background:var(--fg);color:var(--bg)} .chip.on .n{color:var(--bg)}
+  .chip.full .n{color:var(--done)} .chip.on.full .n{color:var(--bg)}
+  .tools{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+  .tools label{font-size:13px;color:var(--mute);display:flex;gap:6px;align-items:center}
+  .tools input[type=search]{flex:1;min-width:120px;border:1.5px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:7px 10px;font:15px var(--body)}
+  .bar{height:4px;background:var(--line);border-radius:2px;margin-top:8px;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--done);width:0;transition:width .3s}
+
+  .block{margin:20px 0 6px}
+  .where{font-family:var(--display);font-size:24px;text-transform:uppercase;color:var(--fg);letter-spacing:.02em;line-height:1}
+  .where small{font-family:var(--body);font-size:13px;text-transform:none;letter-spacing:0;color:var(--mute);display:block;margin-top:3px}
+  .gear{display:grid;grid-template-columns:34px 1fr;gap:4px 8px;font-size:13px;color:var(--mute);margin:8px 0 8px;line-height:1.35}
+  .gear b{font-family:var(--display);font-size:15px;font-weight:400;letter-spacing:.04em;color:var(--mute);text-transform:uppercase;padding-top:1px}
+  .list{display:flex;flex-direction:column;gap:6px}
+  .q{display:grid;grid-template-columns:30px 1fr 22px;gap:10px;align-items:start;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:11px 10px 11px 12px;min-width:0}
+  .q.ptc{border-left:4px solid var(--take)}
+  .q .box{width:24px;height:24px;border:2px solid var(--fg);border-radius:6px;margin-top:1px;display:grid;place-items:center;cursor:pointer;font-family:var(--display);font-size:20px;line-height:1;color:var(--bg);background:transparent}
+  .q.done .box{background:var(--done);border-color:var(--done)}
+  .q .t{min-width:0;cursor:pointer}
+  .q.done .t{color:var(--mute);text-decoration:line-through;text-decoration-thickness:1.5px}
+  .q .who{font-family:var(--display);font-size:15px;color:var(--accent);text-transform:uppercase;letter-spacing:.03em;line-height:1;margin-bottom:3px}
+  .q .who.take{color:var(--take)} .q .who.grey{color:var(--mute)}
+  .q .h{font-size:13.5px;color:var(--mute);margin-top:4px;line-height:1.35}
+  .q .note{font-family:var(--hand);font-size:14px;color:var(--accent);margin-top:5px;white-space:pre-wrap}
+  .q .arrow{color:var(--mute);font-size:20px;line-height:1;padding-top:2px;cursor:pointer}
+  .add{display:flex;gap:8px;margin-top:10px}
+  .add input{flex:1;min-width:0;border:1.5px solid var(--line);background:var(--bg);color:var(--fg);border-radius:8px;padding:8px 10px;font:15px var(--body)}
+  .btn{border:1.5px solid var(--fg);background:var(--fg);color:var(--bg);border-radius:8px;padding:9px 14px;font:500 14px var(--body);cursor:pointer}
+  .btn.ghost{background:transparent;color:var(--fg)}
+  .btn.danger{border-color:var(--bad);color:var(--bad);background:transparent}
+  .btn.done{background:var(--done);border-color:var(--done);color:#fff}
+  .empty{color:var(--mute);padding:24px 0;text-align:center;font-size:15px}
+  .mode{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:2px solid var(--line);margin:0 0 10px}
+  .mode button{border:0;border-bottom:4px solid transparent;margin-bottom:-2px;background:transparent;color:var(--mute);font-family:var(--display);font-size:28px;line-height:1;text-transform:uppercase;padding:8px 6px 6px;cursor:pointer;letter-spacing:.04em;display:flex;gap:8px;justify-content:center;align-items:baseline}
+  .mode button .tn{font-size:18px;opacity:.8}
+  .mode button[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--fg)}
+  .mode button#mMom[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+  .mode button:focus-visible{outline:2px solid var(--accent);outline-offset:-4px}
+  .q.moment{border-left:4px solid var(--accent)}
+  .mode button#mDrn[aria-selected="true"]{color:var(--drn);border-bottom-color:var(--drn)}
+  .q.drone{border-left:4px solid var(--drn)}
+  .q .who.drn{color:var(--drn)} .q .who.must{color:var(--take)}
+  .rules.drn{border-color:var(--drn)} .rules.drn h3{color:var(--drn)}
+  .sheet .mv{background:var(--map);border-radius:10px;padding:6px;margin:8px 0}
+  .sheet .mv svg{display:block;width:100%;height:auto}
+  .sheet .steps{margin:8px 0;padding:12px 14px 12px 32px;border:2px solid var(--fg);font-size:17px;line-height:1.45}
+  .sheet .steps li{margin:3px 0}
+  .rules{background:var(--card);border:2px solid var(--accent);border-radius:10px;padding:12px 14px;margin:14px 0 4px}
+  .rules h3{font-family:var(--display);font-size:24px;font-weight:400;text-transform:uppercase;margin:0 0 6px;line-height:1;color:var(--accent)}
+  .rules ol{margin:0;padding-left:20px;font-size:15px;line-height:1.4}
+  .rules li{margin:4px 0}
+
+  /* sheet */
+  .veil{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20}
+  .sheet{position:fixed;left:0;right:0;bottom:0;max-height:92vh;overflow-y:auto;background:var(--bg);color:var(--fg);z-index:21;border-radius:16px 16px 0 0;padding:14px 16px calc(24px + env(safe-area-inset-bottom,0px));box-shadow:0 -8px 30px rgba(0,0,0,.25)}
+  .sheet .top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+  .sheet .lbl{font-family:var(--display);font-size:16px;color:var(--mute);text-transform:uppercase;letter-spacing:.04em;display:block;margin-bottom:4px}
+  .sheet .x{border:0;background:transparent;font-size:28px;line-height:1;color:var(--mute);cursor:pointer;padding:0 4px}
+  .sheet .bk{font-family:var(--display);font-size:20px;color:var(--mute);text-transform:uppercase}
+  .sheet .before{background:var(--soft);padding:10px 12px;margin:8px 0;font-size:15px;color:var(--mute);border-left:3px solid var(--line);white-space:pre-wrap}
+  .sheet .runin{margin:8px 0;padding:10px 12px;border:1.5px dashed var(--accent);font-family:var(--hand);font-size:18px;color:var(--accent);line-height:1.35}
+  .sheet .say{margin:10px 0;padding:14px 14px 12px;border:2px solid var(--fg);font-size:20px;line-height:1.4;font-weight:500;white-space:pre-wrap}
+  .sheet .say .lbl{color:var(--fg)}
+  .sheet .big{font-size:20px;line-height:1.4;font-weight:500;margin:6px 0 8px}
+  .sheet .next{font-size:15px;color:var(--mute);margin:8px 0;white-space:pre-wrap}
+  .sheet .hud{background:var(--hud);color:var(--hudfg);padding:10px 12px;margin:10px 0;font-size:15px;line-height:1.4;border-radius:8px}
+  .sheet .hud .lbl{color:#B5B2AC}
+  .sheet .hud b{color:var(--hudv);font-weight:600}
+  .sheet .flag{margin:8px 0;font-size:14.5px;padding:8px 10px;border-left:3px solid var(--take);color:var(--fg)}
+  .sheet .hint{font-size:15px;color:var(--mute);margin:4px 0 8px}
+  .sheet textarea,.sheet select{border:1.5px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:8px 10px;font:15px var(--body);width:100%}
+  .sheet textarea{min-height:60px;resize:vertical}
+  .sheet .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .sheet .edit{border-top:1px dashed var(--line);margin-top:14px;padding-top:12px;display:grid;gap:8px}
+  .sheet .edit label{font-size:13px;color:var(--mute)}
+  .btn:focus-visible,.chip:focus-visible,.box:focus-visible,.x:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  /* setups */
+  .setrow{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px}
+  .setbtn{border:1.5px solid var(--fg);background:transparent;color:var(--fg);border-radius:999px;padding:5px 11px;font:500 13px var(--body);cursor:pointer;display:flex;gap:6px;align-items:center}
+  .setbtn .dots{display:flex;gap:3px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .setimg{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:10px;margin:0 0 8px;cursor:pointer;background:var(--soft)}
+  .sheet .hero{width:100%;border-radius:10px;display:block;margin-top:6px}
+  .sheet .cap{font-size:13px;color:var(--mute);margin:5px 0 0}
+  .sheet .map{background:var(--map);border-radius:10px;padding:6px}
+  .sheet .map svg{display:block;width:100%;height:auto}
+  .sheet .cam{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:10px 12px;margin-bottom:10px;border-left:5px solid var(--c)}
+  .sheet .cam .hd{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline}
+  .sheet .cam .nm{font-family:var(--display);font-size:22px;line-height:1;text-transform:uppercase;color:var(--c)}
+  .sheet .cam .mt{font-size:12.5px;font-weight:600;border:1.5px solid var(--c);color:var(--c);border-radius:999px;padding:1px 8px}
+  .sheet .cam .what{font-size:15.5px;margin:6px 0}
+  .sheet .cam img{width:100%;border-radius:8px;display:block;margin:6px 0}
+  .sheet .cam .set{background:var(--hud);color:var(--hudfg);font-size:14px;padding:8px 10px;border-radius:8px;line-height:1.4}
+  .sheet .cam .set b{color:var(--hudv);font-weight:600}
+  .sheet .alt{border-left:3px solid var(--take);padding:8px 10px;font-size:15px;background:var(--card);margin-top:4px}
+  .sheet .warn{border-left:3px solid var(--bad);padding:8px 10px;font-size:15px;margin-top:8px;background:var(--card)}
+  .sheet .solo{font-size:13.5px;color:var(--mute);margin-top:12px}
+  .setbtn:focus-visible,.setimg:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  @media (prefers-reduced-motion: reduce){ .bar i{transition:none} }
+  #sync{position:fixed;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:60;font:500 12px/1 var(--body);padding:7px 10px;border-radius:999px;background:var(--card);color:var(--mute);border:1px solid var(--line);pointer-events:none}
+  #sync.wait{color:var(--take);border-color:var(--take)} #sync.bad{color:var(--bad);border-color:var(--bad)} #sync.ok{opacity:.8}
+  #keyScreen{position:fixed;inset:0;z-index:80;background:var(--bg);display:grid;place-items:center;padding:24px 16px}
+  #keyScreen form{display:grid;gap:12px;width:min(420px,100%)}
+  #keyScreen h2{font:400 44px/1 var(--display);margin:0} #keyScreen p{margin:0;color:var(--mute);font-size:15px}
+  #keyScreen input{font:16px var(--body);padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg)}
+  #keyScreen .msg{color:var(--bad)}
+</style>
+
+<div class="wrap">
+  <h1>Nina · Shoot Book</h1>
+  <p class="sub">Ask tab: Q&amp;A with Nina and your A-Roll. Moments tab: life between them. Tap a box when done. Tap the words for the full text. <b id="count">…</b> · <span id="status" class="status"></span></p>
+
+  <div class="strip">
+    <div class="mode" role="tablist" aria-label="Ask, Moments or Drone">
+      <button type="button" role="tab" id="mAsk" aria-selected="true">Ask <span class="tn" id="nAsk"></span></button>
+      <button type="button" role="tab" id="mMom" aria-selected="false">Moments <span class="tn" id="nMom"></span></button>
+      <button type="button" role="tab" id="mDrn" aria-selected="false">Drone <span class="tn" id="nDrn"></span></button>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div class="tools">
+      <input type="search" id="search" placeholder="Find a line…" aria-label="Find a line">
+      <label><input type="checkbox" id="hideDone"> hide done</label>
+      <label><input type="checkbox" id="pics"> pictures</label>
+    </div>
+    <div class="bar"><i id="bar"></i></div>
+  </div>
+
+  <div id="body"><div class="empty">Loading…</div></div>
+</div>
+<div id="sheetRoot"></div>
+
+<script>
+(function(){
+  const DAYS = [
+    ["d1","Day 1 · 8 Oct"],
+    ["d2","Day 2 · 9 Oct"],
+    ["d3","Kainchi · 10 Oct"],
+    ["r","Rishikesh · 16–19"],
+    ["c","Concert · 19 Oct"],
+    ["m","Must-get"],
+  ];
+  const SET_FUJI_PTC="Fuji on the tripod: 4K 25p · H.264 200 Mbps · Eterna · 1/50 · ISO 160 · WB 5600K · AF-C eye. GO Ultra in hand: 4K25 · Auto. Mic on you.";
+  const SET_JEEP="Luna: Pro mode · 4K 25p · 1/50 · ISO 400 · ND32 on · Leica Natural · 50 Hz · 20 mm wide. GO on the roll bar: 4K25 · M 1/50 · ND16 · sharpness low. Receiver in the Luna, or in the Fuji if the test failed.";
+  const SET_SIT="Fuji 50–70 mm on her: 4K 25p · 1/50 · ISO auto ≤3200 · WB to the lamp · TEMP HIGH (tripod only). Luna 60 mm tele: 4K25 · ISO ≤1600 · Deep Track off. iPhone wide: Blackmagic · 4K25 · 180° · Rec.709 · never stops. Receiver in the Fuji jack. Clap once.";
+  const SET_DUSK="Luna: 4K 25p · 1/50 · ISO up to 1600 · no ND · 20 mm. If the light is gone: GO Ultra selfie, Auto. Mic on you.";
+  const SET_WALK="Luna 20 mm: 4K 25p · 1/50 · ND32 if sun · Deep Track on her · gimbal Follow. GO Ultra on your chest: 4K25 · ND16. Both transmitters on.";
+  const SET_SAFARI_SHOTS="Luna 20 mm handheld or 60 mm from the seat in front. GO on the rail or bonnet 4K50 for texture. Fuji 300 mm for animals: 4K25, clips under 3 min, then in the bag.";
+  const SET_DAWN="No ND on anything until 07:00. ISO up. Luna wide f/1.8 first. Fuji 300 mm: expect ISO 3200+. Phone is in the locker.";
+
+  const MOM_CAM="GO Ultra rolling on the table or dashboard, forgotten. Luna 60 mm from a distance. Fuji 100–300 mm from far away: she forgets the camera.";
+  const MOM_SET="Leave her mic on. The clip-on backup records every word, even when no camera rolls. Fuji clips under 3 min. Luna 4K25. Never say cut.";
+  const isMom=d=>d.type==='moment'||d.type==='shot';
+  const isDrn=d=>d.type==='drone';
+  const DRONE_CAM="DJI Mini 4 in your hands, remote on the neck strap. The GO keeps rolling on the bag or the jeep: you flying is a shot too.";
+  const DRONE_SET="Cine mode · 4K 25p · 1/50 · ND to hold 1/50 · WB 5600K locked · Normal colour so it cuts with the GO (D-Log M only on a Mini 4 Pro, and only if you grade) · under 120 m · land at 30%.";
+  // key, name, hint, day, camera, settings
+  const BLOCKS = [
+    ["d1-arrival","Arrival · journey","Car, road, resort door.","d1","GO Ultra on the dashboard. Luna from the back seat.","GO 4K25 · M 1/50 · ND16. Luna 4K25 · ND32. Drone: see the Drone tab."],
+    ["d1-ptc1","Before the safari · A-Roll by the jeep","You alone. Forest and jeep behind you.","d1","Fuji on the tripod, 35–50 mm, eye level. GO Ultra in your hand as the raw angle.",SET_FUJI_PTC],
+    ["d1-gate","At the gate","Phones are banned on every Corbett safari.","d1","—","Phone into the locker. Paper list in the pocket. Ask the staff about the Luna."],
+    ["corbett-safari","Afternoon safari · Q&A with Nina in the jeep","Jeep stopped, engine off. The tiger questions. Short answers.","d1","Luna 60 mm on her face from the seat in front. GO Ultra on the roll bar, both of you in frame.",SET_JEEP],
+    ["d1-safari-shots","Afternoon safari · shots","Nina in the jeep. The forest. Animals if they come.","d1","Luna, GO Ultra, Fuji 300 mm.",SET_SAFARI_SHOTS],
+    ["d1-dusk","Leaving the forest · dusk","On the road out.","d1","Luna in your hand in the moving jeep. GO Ultra on the rear for the headlights.",SET_DUSK],
+    ["d1-takes","Evening · your A-Roll","Takes A, B, C. One setup. Two tries each. Do this first, while you are fresh.","d1","Fuji 50 mm on the tripod, a lamp on one side of your face, room dark behind. Luna 60 mm second angle.","Fuji 4K25 · 1/50 · ISO auto ≤3200 · WB to the lamp · TEMP HIGH. Luna 4K25 · 60 mm. Mic on you."],
+    ["corbett-sitdown","Evening · Q&A with Nina, part 1","Seated. Who she is, and purpose. Blocks of 12 minutes. Rest 3.","d1","Fuji on her face. Luna 60 mm beside it. iPhone wide, running the whole time.",SET_SIT],
+    ["d1-moments","Day 1 · moments to catch","Safari, the resort, the dinner table. Watch for these.","d1",MOM_CAM,MOM_SET],
+    ["d1-drone","Day 1 · drone","Corbett permission in your pocket. Fly between the Q&As, never during one.","d1",DRONE_CAM,DRONE_SET],
+    ["d1-night","Night","Before you sleep.","d1","—","Laptop + SSD. Every card copied. Every battery on charge. Alarm 05:15."],
+
+    ["d2-dawn","Dawn safari · A-Roll","PTC 2 in the moving jeep. PTC 3 when it stops in an empty stretch.","d2","Luna 20 mm at arm's length (moving). Fuji on the tripod or jeep rail (stopped). GO on the roll bar.",SET_DAWN+" Moving: Luna 4K25 · 1/50 · ISO ≤1600 · Deep Track on your face. Stopped: Fuji 35 mm · 4K25 · 1/50."],
+    ["d2-shots","Dawn safari · shots","The cut needs these.","d2","Fuji lock-off. Luna 60 mm. GO on the rail.",SET_DAWN],
+    ["d2-sitdown","Late morning · Q&A with Nina, part 2","At the resort, forest behind her. Tigers, money, the guards. Blocks of 12 minutes.","d2","Fuji on her face. Luna 60 mm beside it. iPhone wide, running the whole time.",SET_SIT+" Daylight: ND on the Luna, Fuji in the shade."],
+    ["corbett-uma-naveen","Midday · Q&A with Uma + Naveen","After lunch, at the resort. Take I before Uma. Take J after. Naveen only if he is there.","d2","Fuji 50 mm on the tripod. Luna 20 mm wide. Move the transmitter to the speaker.",SET_SIT],
+    ["d2-takes","Afternoon · your A-Roll","Takes F, G, H. Same setup as last night, so they match.","d2","Fuji 50 mm on the tripod, a lamp or a window on one side of your face. Luna 60 mm second angle.","Fuji 4K25 · 1/50 · ISO auto ≤3200 · TEMP HIGH (tripod). Luna 4K25 · 60 mm. Mic on you."],
+    ["d2-moments","Day 2 · moments to catch","Dawn, the jeep, the resort day, the goodbye.","d2",MOM_CAM,MOM_SET],
+    ["d2-drone","Day 2 · drone","Dawn first. The pull-back from Nina is the most important flight of the trip.","d2",DRONE_CAM,DRONE_SET],
+    ["d2-leave","Leave Corbett","End of day 2. Offload, the road to the hills.","d2","GO Ultra on the dashboard. Luna out of the window.","GO 4K25 · ND16. Luna 4K25 · ND32. Drone: see the Drone tab."],
+
+    ["k-ptc","Hill road · A-Roll","You alone, walking, somewhere quiet.","d3","Luna gimbal in your hand, 20 mm, on you, road moving behind. Or GO Ultra selfie. Once more with the Luna on the tripod, you walk into frame.",SET_WALK],
+    ["kainchi","Q&A with Nina · walking, then seated","Walk: 4 questions. Seated: 14 in two blocks of 7.","d3","Walk: Luna 20 mm follows you both, GO Ultra on your chest. Seated: Fuji on her, Luna 60 mm, iPhone wide.",SET_WALK+" Seated: "+SET_SIT],
+    ["k-takes","Kainchi · A-Roll","K after the walk. L after the seated block.","d3","Fuji on the tripod or Luna in hand. Same light as the question before it.","Fuji 4K25 · 1/50. Luna 4K25. Mic on you."],
+    ["k-moments","Kainchi · moments to catch","Before any question. Her first look. The quiet.","d3",MOM_CAM,MOM_SET+" Outside the mandir only."],
+    ["k-drone","Kainchi · drone, from where you stay","Fly from the stay and the hills around it. Never over the mandir or its crowd.","d3",DRONE_CAM,DRONE_SET],
+    ["k-shots","Kainchi · shots","Permitted exteriors only. No camera inside the mandir.","d3","Luna, GO Ultra. No drone over the mandir: drone shots are in the Drone tab.","Luna 4K25 · ND32 in sun. Two minutes of wild sound: bells, river, road."],
+
+    ["r-ptc","Rishikesh · A-Roll","Four pieces across the days.","r","Walk: Luna 20 mm. Concert day: Fuji on the tripod. Dawn: iPhone 24 mm or Luna. Walk back: Luna, then turn to camera.",SET_FUJI_PTC],
+    ["r-drone","Rishikesh · drone","West bank only, with care.","r",DRONE_CAM,DRONE_SET+" Check the Digital Sky map. Tell the local police."],
+    ["r-moments","Rishikesh · moments to catch","The sisters, the prep, the river.","r",MOM_CAM,MOM_SET],
+    ["rishikesh-nina","Rishikesh · Q&A with Nina","The long seated Q&A. Ganga walk.","r","Fuji on her. Luna 60 mm. iPhone wide.",SET_SIT],
+    ["rishikesh-kd","Rishikesh · Q&A with KD","If KD is present. Else a separate pickup.","r","Fuji on him. Luna 60 mm. iPhone wide.",SET_SIT],
+    ["rishikesh-sarina","Rishikesh · Q&A with Sarina","Her sister. Concert prep.","r","Fuji on her. Luna 20 mm wide.",SET_SIT],
+    ["concert-day","Concert · Q&A with Nina","Backstage before. Quiet after.","c","Luna for backstage. Fuji on the tripod for the performance, full stretches, never fragments.","Performance: Fuji 4K25 · 1/50 · lock exposure · clean sound from the desk if they give it. Luna 4K25 handheld for faces."],
+    ["c-moments","Concert · moments to catch","Nerves before. The exhale after.","c",MOM_CAM,MOM_SET],
+    ["must-get","Must-get lines","Verbatim lines the edit needs on camera.","m","Whatever is running. Make sure a camera is on her face.","—"],
+  ];
+  /* ===== SETUPS: where each camera goes, how it hangs on you, what it sees ===== */
+  const CAM={luna:["Luna Ultra","--luna"],go:["GO Ultra","--go"],fuji:["Fuji X-S20","--fuji"],iph:["iPhone","--iph"]};
+  const rad=a=>a*Math.PI/180;
+  function wedge(x,y,a,f,l,c,dash){const p1=[x+l*Math.cos(rad(a-f/2)),y+l*Math.sin(rad(a-f/2))],p2=[x+l*Math.cos(rad(a+f/2)),y+l*Math.sin(rad(a+f/2))];
+    return '<path d="M'+x+','+y+' L'+p1[0].toFixed(1)+','+p1[1].toFixed(1)+' A'+l+','+l+' 0 0 1 '+p2[0].toFixed(1)+','+p2[1].toFixed(1)+' Z" fill="var('+c+')" fill-opacity=".16" stroke="var('+c+')" stroke-opacity=".7" stroke-width="1"'+(dash?' stroke-dasharray="4 3"':'')+'/>';}
+  const F='font-family="Inter Tight,system-ui,sans-serif"';
+  function cm(k,x,y,a,f,l,t,tx,ty,dash){const c=CAM[k][1];return wedge(x,y,a,f,l,c,dash)+'<rect x="'+(x-5)+'" y="'+(y-4)+'" width="10" height="8" rx="2" fill="var('+c+')"/><text x="'+tx+'" y="'+ty+'" font-size="10" '+F+' font-weight="600" fill="var('+c+')">'+t+'</text>';}
+  function pp(x,y,t,sub){return '<circle cx="'+x+'" cy="'+y+'" r="9" fill="var(--fg)"/><text x="'+x+'" y="'+(y+3.5)+'" font-size="10" text-anchor="middle" fill="var(--bg)" '+F+' font-weight="600">'+t+'</text>'+(sub?'<text x="'+x+'" y="'+(y+21)+'" font-size="9" text-anchor="middle" fill="var(--mute)" '+F+'>'+sub+'</text>':'');}
+  const tx=(x,y,s,an)=>'<text x="'+x+'" y="'+y+'" font-size="9.5" fill="var(--mute)" '+F+(an?' text-anchor="'+an+'"':'')+'>'+s+'</text>';
+  const sv=b=>'<svg viewBox="0 0 320 200" role="img" aria-label="Top view of camera positions">'+b+'</svg>';
+  const JEEP='<rect x="55" y="45" width="215" height="110" rx="14" fill="none" stroke="var(--mapline)" stroke-width="2"/><rect x="215" y="55" width="36" height="34" rx="5" fill="none" stroke="var(--mapline)"/><rect x="215" y="111" width="36" height="34" rx="5" fill="none" stroke="var(--mapline)"/><rect x="85" y="55" width="60" height="90" rx="6" fill="none" stroke="var(--mapline)"/><line x1="190" y1="47" x2="190" y2="153" stroke="var(--mapline)" stroke-width="3"/>'+tx(196,40,'front roll bar');
+  const SITMAP=(light)=>sv('<line x1="10" y1="22" x2="310" y2="22" stroke="var(--mapline)" stroke-width="3"/>'+tx(160,14,'behind her: forest','middle')+'<circle cx="45" cy="70" r="8" fill="none" stroke="var(--take)"/>'+tx(28,58,light)+pp(80,105,'N','Nina')+pp(240,105,'S','you')+cm('fuji',230,82,170,18,140,'Fuji · tripod · 50–70 mm',190,70)+cm('luna',228,130,190,24,135,'Luna · on the bag · 60 mm',170,160)+cm('iph',160,30,90,95,100,'iPhone · magnet',166,44));
+  const SITCAMS=(day)=>[
+    {k:'fuji',mount:'Tripod · next to your head',what:'Her face at 50–70 mm. Lens at her eye level, close to your head, so she looks almost into it.',img:day?'img/s71.jpg':'img/s21.jpg',set:'<b>4K 25p</b> · <b>1/50</b> · ISO auto ≤3200 · '+(day?'shade, never sun on the body':'WB to the lamp')+' · Eterna · AF-C eye · TEMP <b>HIGH</b> (tripod only). Mic receiver in the jack.'},
+    {k:'luna',mount:'Standing on the bag',what:'A second size of her: 60 mm, chest up, a little to the side of the Fuji.',set:'<b>4K25</b> · <b>1/50</b> · ISO ≤1600 · 60 mm · Deep Track off'+(day?' · <b>ND32</b>':'')+'.'},
+    {k:'iph',mount:'Magnet · metal post or lamp',what:'The wide two-shot from the side. It never stops. It is your safety for the whole sit-down.',img:day?null:'img/s22.jpg',set:'Blackmagic app · <b>4K25</b> · <b>180°</b> · Rec.709 · WB locked.'}];
+  const SETUPS={
+   jeep_qa:{name:'Q&A in a stopped jeep',hero:'img/s10.jpg',cap:'You beside her on the rear bench. GO on the front roll bar. Luna in your hand. Fuji in the bag on your lap.',
+     map:sv(JEEP+pp(233,72,'D')+pp(233,128,'G')+pp(110,75,'S','you')+pp(110,128,'N','Nina')+cm('go',190,100,180,120,105,'GO · clip',150,30)+cm('luna',122,88,105,26,50,'Luna · hand · 60 mm',8,190)+'<rect x="95" y="95" width="16" height="12" rx="2" fill="none" stroke="var(--fuji)" stroke-width="1.5"/>'+tx(8,100,'Fuji in bag')+tx(280,30,'engine off','end')),
+     cams:[{k:'luna',mount:'In your hand',what:'Her face, three-quarter, at 60 mm. Hold it low, elbow on your knee or on the bag.',img:'img/s11.jpg',set:'Pro mode · <b>4K 25p</b> · <b>1/50</b> · ISO 400 · <b>ND32</b> · Leica Natural · 50 Hz · 60 mm · Deep Track off.'},
+       {k:'go',mount:'Clip or magnet · front roll bar',what:'Both of you, wide. The safe angle: if the Luna fails, this carries the scene.',img:'img/s12.jpg',set:'<b>4K25</b> · M <b>1/50</b> · <b>ND16</b> · sharpness low. Start it before the jeep stops.'},
+       {k:'fuji',mount:'In the bag on your lap',what:'Not rolling during the Q&A. 300 mm ready for an animal.',set:'An animal comes: stop the Q&amp;A. Fuji on the animal. Luna on her face.'}],
+     alt:'No free hand? Stand the Luna on the bag on your lap, 60 mm on her face.',warn:'Phone in the gate locker. Questions on paper.'},
+   sit_night:{name:'Seated Q&A · lamp light',hero:'img/s20.jpg',cap:'Your one tripod carries the Fuji beside your head. The Luna stands on the bag. The iPhone sits on a magnet.',map:SITMAP('lamp'),cams:SITCAMS(false),
+     alt:'No tripod? Stand the Fuji on the bag on a chair at her eye level, a book under the lens to tilt it. Keep TEMP on STANDARD.',warn:'Clap once at the start of every 12-minute block. Check the Fuji still rolls at each break.'},
+   sit_day:{name:'Seated Q&A · daylight',hero:'img/s70.jpg',cap:'Same three cameras as the evening. Open shade. Her back to the forest, never to the sun.',map:SITMAP('shade'),cams:SITCAMS(true),
+     alt:'No tripod? Stand the Fuji on the bag on a chair at her eye level. Keep TEMP on STANDARD and the body out of the sun.',warn:'Heat: 12 minutes on, 3 off. Fuji in the shade. Move the transmitter when the speaker changes.'},
+   jeep_move:{name:'A-Roll in a moving jeep',hero:'img/s30.jpg',cap:'Luna at arm’s length on your face. GO on the roll bar in front of you, facing back. (The tiger is the picture’s idea.)',
+     map:sv(JEEP+pp(233,72,'D')+pp(233,128,'G')+pp(110,100,'S','you')+cm('luna',142,100,180,70,34,'Luna · hand · 20 mm',100,30)+cm('go',190,100,180,120,105,'GO · roll bar',196,190)+tx(300,104,'moving →','end')),
+     cams:[{k:'luna',mount:'In your hand · arm’s length',what:'You, 20 mm, the forest moving behind you.',img:'img/s31.jpg',set:'<b>4K25</b> · <b>1/50</b> · ISO ≤1600 · <b>no ND before 07:00</b> · 20 mm · Deep Track on your face.'},
+       {k:'go',mount:'Clip · roll bar, facing back',what:'The jeep, the road and you. The locked second angle. At dusk: clip it on the rear for the headlights.',img:'img/s32.jpg',set:'<b>4K25</b> · Auto in low light · 50 Hz.'}],
+     alt:'When the jeep stops: once more with the Fuji standing on the bag on the bench, 35 mm.',warn:'No tripod in a moving jeep. Mic on you with the furry cover.'},
+   aroll:{name:'A-Roll standing · Fuji on the tripod',hero:'img/s60.jpg',cap:'You alone. Fuji on the tripod at your eye level, about 2 m away. GO in your hand as the raw angle.',
+     map:sv('<rect x="70" y="25" width="180" height="50" rx="10" fill="none" stroke="var(--mapline)" stroke-width="2"/>'+tx(160,54,'jeep / wall / room behind you','middle')+pp(160,110,'S','you')+cm('fuji',160,180,270,34,62,'Fuji · tripod · 35–50 mm',172,195)+cm('go',176,118,215,90,22,'GO · in your hand',200,125)+'<circle cx="40" cy="110" r="8" fill="none" stroke="var(--take)"/>'+tx(20,135,'lamp / window')),
+     cams:[{k:'fuji',mount:'Tripod · your eye level',what:'You, waist up, 35–50 mm. Lens at your eye height. Light on one side of your face.',img:'img/s61.jpg',set:'<b>4K 25p</b> · H.264 200 Mbps · Eterna · <b>1/50</b> · ISO 160 (day) or auto ≤3200 (lamp) · AF-C eye.'},
+       {k:'go',mount:'In your hand',what:'A raw selfie angle of the same take. The editor cuts to it when you move.',img:'img/s62.jpg',set:'<b>4K25</b> · Auto · sharpness low · 50 Hz.'},
+       {k:'luna',mount:'Standing on the bag · optional',what:'A tighter second angle at 60 mm for the evening takes.',set:'<b>4K25</b> · <b>1/50</b> · 60 mm.'}],
+     alt:'No tripod? Stand the Fuji on the bag on the jeep bonnet or a wall, at your eye level. Or do the take on the Luna in your hand.',warn:'Two tries for each take. Mic on you. Say the run-in line first, then roll.'},
+   walk:{name:'Walking Q&A',hero:'img/s80.jpg',cap:'Side by side. Luna in your outer hand, angled back at her. GO clipped on your chest strap.',
+     map:sv('<rect x="0" y="70" width="320" height="90" fill="var(--soft)"/>'+tx(312,84,'path / road','end')+pp(150,100,'N','Nina')+pp(150,135,'S','you')+cm('luna',190,140,229,50,62,'Luna · outer hand · 20 mm',190,190)+cm('go',160,124,0,110,90,'GO · chest clip',250,64)+tx(310,120,'walking →','end')),
+     cams:[{k:'luna',mount:'In your outer hand',what:'Her face, three-quarter, 20 mm, as you walk. Arm a little forward, angled back at her.',img:'img/s81.jpg',set:'<b>4K 25p</b> · <b>1/50</b> · <b>ND32</b> if sun · 20 mm · Deep Track on her · gimbal Follow.'},
+       {k:'go',mount:'Clip · your chest strap',what:'Your point of view: the road ahead and her beside you.',img:'img/s82.jpg',set:'<b>4K25</b> · M <b>1/50</b> · <b>ND16</b> · 50 Hz.'},
+       {k:'fuji',mount:'In the bag',what:'Not used on the walk.',set:'Out only for the seated part.'}],
+     alt:'Arm tired? Walk behind her for 20 seconds, Luna low on her back and the road. Then come back to her side.',warn:'Both transmitters on. Walk slowly. Ask the question, then stay quiet for the answer.'},
+   shots:{name:'Safari shots',hero:'img/s90.jpg',cap:'Fuji 300 mm resting on the bag over the roll bar. GO on a magnet on the bonnet. Luna for her face.',
+     map:sv(JEEP+pp(233,72,'D')+pp(233,128,'G')+pp(110,75,'S','you')+pp(110,128,'N','Nina')+cm('fuji',125,62,347,8,175,'Fuji · on the bag · 300 mm',150,22)+cm('go',262,100,0,120,52,'GO · bonnet magnet',232,190)+cm('luna',100,98,90,30,26,'Luna · her face',8,190,true)+tx(302,32,'animal','end')),
+     cams:[{k:'fuji',mount:'Resting on the bag over the roll bar',what:'The animal at 300 mm. The bag is your tripod.',img:'img/s91.jpg',set:'<b>4K25</b> · <b>1/50</b> · ISO up (dawn 3200+) · <b>clips under 3 min</b>, then in the bag.'},
+       {k:'go',mount:'Magnet · bonnet',what:'The track ahead, texture, the jeep moving.',set:'<b>4K50</b> · M <b>1/100</b> · ND16.'},
+       {k:'luna',mount:'In your other hand',what:'Her face when she sees the animal. Faces first, the animal is proof.',set:'<b>4K25</b> · 60 mm.'}],
+     alt:'Only one hand? Fuji on the animal, and trust the GO on the bonnet.',warn:'Engine off before you roll the Fuji. Drone shots: see the Drone tab.'},
+   moments:{name:'Moments · far and forgotten',hero:'img/s40.jpg',cap:'GO clipped to the bag strap on a chair, rolling. You far away with the Fuji at 300 mm.',
+     map:sv('<rect x="45" y="60" width="70" height="40" rx="4" fill="none" stroke="var(--mapline)" stroke-width="2"/>'+tx(52,56,'table')+pp(70,120,'N','Nina')+'<rect x="125" y="72" width="20" height="20" rx="3" fill="none" stroke="var(--mapline)"/>'+tx(122,110,'bag on chair')+cm('go',132,82,195,120,60,'GO · strap clip',120,48)+'<rect x="285" y="138" width="16" height="16" fill="var(--mapline)"/>'+tx(300,175,'pillar','end')+pp(272,150,'S','')+cm('fuji',260,146,188,7,190,'Fuji · hand · 300 mm · 15 m',150,190)+cm('luna',95,140,250,30,30,'Luna later · hands',100,196,true)),
+     cams:[{k:'go',mount:'Clip · bag strap, bag on a chair',what:'The whole table, wide. Leave it. Walk away.',set:'<b>4K25</b> · Auto in shade · sharpness low.'},
+       {k:'fuji',mount:'In your hand · shoulder on a pillar',what:'Her face from 15 m at 200–300 mm. She does not see you.',img:'img/s41.jpg',set:'<b>4K25</b> · <b>1/50</b> · ND if sun · <b>clips under 3 min</b>.'},
+       {k:'luna',mount:'In your hand · later',what:'When she sits: walk in, 60 mm, close on the hands.',img:'img/s42.jpg',set:'<b>4K25</b> · <b>1/50</b> · 60 mm · close and shallow.'}],
+     alt:'Only one hand free? Keep the GO rolling on the bag and hold only the Fuji.',warn:'Never say cut. Her mic stays on. The clip-on backup records every word.'},
+   first_look:{name:'Arrival · her first look',hero:'img/s50.jpg',cap:'You on the other side of the car with the Luna, already rolling. GO on your chest strap.',
+     map:sv('<rect x="0" y="70" width="320" height="70" fill="var(--soft)"/>'+tx(312,84,'hill road','end')+'<line x1="0" y1="165" x2="320" y2="165" stroke="var(--mapline)" stroke-width="4"/>'+tx(312,182,'stone wall · river below','end')+'<rect x="95" y="90" width="80" height="32" rx="6" fill="none" stroke="var(--mapline)" stroke-width="2"/>'+tx(120,110,'car')+pp(150,135,'N','')+pp(115,58,'S','you')+cm('luna',122,68,62,24,85,'Luna · hand · 60 mm',130,40)+cm('go',108,70,90,110,30,'GO · chest clip',8,45)+pp(40,155,'N','')+tx(55,150,'later: alone')+cm('fuji',300,155,181,6,255,'Fuji · later · 300 mm',210,196,true)),
+     cams:[{k:'luna',mount:'In your hand',what:'Her first look, 60 mm, across the car. Roll before her door opens.',img:'img/s51.jpg',set:'<b>4K25</b> · <b>1/50</b> · ND32 if sun · 60 mm.'},
+       {k:'go',mount:'Clip · your chest strap',what:'Your own arrival. It rolls the whole time you walk.',set:'<b>4K25</b> · M <b>1/50</b> · ND16.'},
+       {k:'fuji',mount:'Later · rested on the wall',what:'When she sits alone: 300 mm from far. Do not go near.',img:'img/s52.jpg',set:'<b>4K25</b> · <b>1/50</b> · clips under 3 min · strap round your wrist.'}],
+     alt:'The picture shows the Fuji left alone on the wall. Do not do this. Strap round your wrist, or keep it in the bag.',warn:'No camera inside the mandir. No drone over the mandir. No phone inside.'},
+   road:{name:'On the road',map:sv('<rect x="0" y="60" width="320" height="80" fill="var(--soft)"/>'+'<rect x="90" y="75" width="130" height="50" rx="12" fill="none" stroke="var(--mapline)" stroke-width="2"/>'+tx(150,70,'car','middle')+pp(180,90,'D')+pp(135,110,'S','you')+cm('go',212,100,0,110,80,'GO · dashboard magnet',230,52)+cm('luna',140,124,90,60,50,'Luna · out of the window',150,196)+tx(312,150,'driving →','end')),
+     cams:[{k:'go',mount:'Magnet or clip · dashboard',what:'The road ahead, rolling the whole drive.',set:'<b>4K25</b> · M <b>1/50</b> · ND16.'},
+       {k:'luna',mount:'In your hand · window',what:'The road and the hills sliding past. Her face only if she says yes.',set:'<b>4K25</b> · <b>1/50</b> · ND32 · 20 mm.'}],
+     alt:'Tired? Leave only the GO rolling.',warn:'Drone road shots live in the Drone tab. No drone over the Kainchi mandir.'},
+   concert:{name:'Concert',hero:'img/s100.jpg',cap:'Fuji on the tripod at the back for the full performance. Luna in your hand for faces.',
+     map:sv('<rect x="80" y="10" width="160" height="40" rx="4" fill="none" stroke="var(--mapline)" stroke-width="2"/>'+tx(160,34,'stage','middle')+pp(160,30,'N','')+'<g fill="var(--mapline)">'+[70,95,120].map(y=>[100,130,160,190,220].map(x=>'<circle cx="'+x+'" cy="'+y+'" r="4"/>').join('')).join('')+'</g>'+tx(250,98,'audience')+cm('fuji',160,180,270,14,150,'Fuji · tripod · back',172,195)+cm('luna',295,110,200,50,80,'Luna · hand · faces',200,160)),
+     cams:[{k:'fuji',mount:'Tripod · back of the hall',what:'The full performance, full stretches, never fragments. Her face at 100 mm.',img:'img/s101.jpg',set:'<b>4K25</b> · <b>1/50</b> · lock exposure · WB to the stage lights · TEMP HIGH (tripod).'},
+       {k:'luna',mount:'In your hand',what:'Backstage before, the audience faces during, the quiet after.',set:'<b>4K25</b> · <b>1/50</b> · ISO ≤1600.'},
+       {k:'go',mount:'Clip · bag on a chair near the stage',what:'A wide of the stage. Ask first.',set:'<b>4K25</b> · Auto.'}],
+     alt:'Ask for clean sound from the desk. If they say no, your clip-on backup on her still records.',warn:'The Fuji must not stop. Check it between songs.'}
+  };
+  const BSET={'d1-arrival':['road'],'d1-ptc1':['aroll'],'corbett-safari':['jeep_qa'],'d1-safari-shots':['shots'],'d1-dusk':['jeep_move'],'d1-takes':['aroll'],'corbett-sitdown':['sit_night'],'d1-moments':['moments'],
+    'd2-dawn':['jeep_move'],'d2-shots':['shots'],'d2-sitdown':['sit_day'],'corbett-uma-naveen':['sit_day'],'d2-takes':['aroll'],'d2-moments':['moments'],'d2-leave':['road'],
+    'k-ptc':['walk'],'kainchi':['walk','sit_day'],'k-takes':['aroll'],'k-moments':['first_look'],'r-ptc':['walk','aroll'],'r-moments':['moments'],'rishikesh-nina':['sit_day','walk'],'rishikesh-kd':['sit_day'],'rishikesh-sarina':['sit_day'],'concert-day':['concert'],'c-moments':['concert','moments']};
+
+
+  /* ===== DRONE: move diagrams (side view) ===== */
+  const MOVES={rise:'Rise reveal',topdown:'Top-down rise',pullback:'Pull-back (Dronie)',track:'Follow',push:'Low push',hover:'Still hover',drift:'Slow drift',nofly:'No fly'};
+  function moveSvg(m){
+    const G='<line x1="0" y1="96" x2="320" y2="96" stroke="var(--mapline)" stroke-width="2"/>';
+    const tree=(x,h)=>'<path d="M'+x+',96 l-9,0 l9,-'+h+' l9,'+h+' z" fill="var(--mapline)" opacity=".6"/>';
+    const trees=[20,45,70,240,265,290].map((x,i)=>tree(x,18+(i%3)*6)).join('');
+    const dr=(x,y,c)=>'<g fill="'+(c||'var(--drn)')+'"><rect x="'+(x-7)+'" y="'+(y-3)+'" width="14" height="6" rx="2"/><ellipse cx="'+(x-10)+'" cy="'+(y-5)+'" rx="6" ry="1.6"/><ellipse cx="'+(x+10)+'" cy="'+(y-5)+'" rx="6" ry="1.6"/></g>';
+    const ar=(x1,y1,x2,y2,dash)=>'<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="var(--drn)" stroke-width="2.5" marker-end="url(#ah)"'+(dash?' stroke-dasharray="5 4"':'')+'/>';
+    const T=(x,y,t,a)=>'<text x="'+x+'" y="'+y+'" font-size="10" fill="var(--mute)" font-family="Inter Tight,system-ui,sans-serif"'+(a?' text-anchor="'+a+'"':'')+'>'+t+'</text>';
+    const per=(x)=>'<circle cx="'+x+'" cy="84" r="4" fill="var(--fg)"/><line x1="'+x+'" y1="88" x2="'+x+'" y2="96" stroke="var(--fg)" stroke-width="2"/>';
+    const jeep=(x)=>'<rect x="'+x+'" y="86" width="26" height="10" rx="2" fill="var(--fg)"/>';
+    const defs='<defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--drn)"/></marker></defs>';
+    let b='';
+    if(m==='rise') b=trees+dr(160,80)+ar(160,72,160,22)+T(172,30,'up to ~100 m, tilt up')+T(172,84,'start just above the trees');
+    else if(m==='topdown') b=trees+jeep(147)+dr(160,48)+'<line x1="160" y1="52" x2="160" y2="84" stroke="var(--drn)" stroke-dasharray="2 3"/>'+ar(150,44,150,10)+T(172,30,'camera straight down')+T(172,44,'rise: the jeep shrinks');
+    else if(m==='pullback') b=trees+per(110)+dr(122,78)+ar(132,72,262,22)+T(190,70,'back and up, 30–40 s')+T(96,110,'Nina','middle');
+    else if(m==='track') b=trees+jeep(150)+'<line x1="182" y1="91" x2="210" y2="91" stroke="var(--fg)" stroke-width="2" marker-end="url(#ah)"/>'+dr(110,40)+ar(124,40,230,40)+T(110,24,'behind and above, 40–60 m');
+    else if(m==='push') b='<rect x="0" y="86" width="320" height="10" fill="var(--drn)" opacity=".25"/>'+dr(60,72)+ar(74,72,270,72)+T(60,58,'5–10 m over the water');
+    else if(m==='hover') b=trees+dr(160,24)+T(175,28,'still, 60–80 m')+'<circle cx="120" cy="90" r="3" fill="var(--take)"/><circle cx="135" cy="90" r="3" fill="var(--take)"/>'+'<line x1="145" y1="90" x2="200" y2="90" stroke="var(--take)" stroke-width="2" marker-end="url(#ah)"/>'+T(120,110,'headlights move, the drone does not');
+    else if(m==='drift') b=trees+'<rect x="0" y="66" width="320" height="22" fill="var(--mapline)" opacity=".35"/>'+T(312,80,'mist','end')+dr(60,50)+ar(74,50,220,50,true)+T(60,36,'very slow, no turns');
+    else if(m==='nofly') b=dr(160,50,'var(--mute)')+'<line x1="140" y1="30" x2="180" y2="70" stroke="var(--bad)" stroke-width="4"/><line x1="180" y1="30" x2="140" y2="70" stroke="var(--bad)" stroke-width="4"/>'+T(160,92,'not here','middle');
+    return '<svg viewBox="0 0 320 116" role="img" aria-label="Drone move: '+(MOVES[m]||'')+'">'+defs+G+b+'</svg>';
+  }
+  CAM.drn=['DJI Mini 4','--drn'];
+  SETUPS.drone={name:'Flying solo',
+    map:sv('<rect x="0" y="120" width="320" height="80" fill="var(--soft)"/>'+tx(312,192,'ground / jeep / lawn','end')+pp(120,150,'S','you')+'<line x1="120" y1="140" x2="200" y2="45" stroke="var(--drn)" stroke-dasharray="4 3"/>'+tx(130,90,'line of sight, always')+cm('drn',210,40,110,60,70,'Drone · ≤120 m',222,30)+'<rect x="230" y="150" width="18" height="16" rx="3" fill="none" stroke="var(--mapline)"/>'+tx(222,184,'bag')+cm('go',238,152,190,100,80,'GO · strap clip, on you flying',150,196)),
+    cams:[{k:'drn',mount:'Remote on your neck strap',what:'One slow move per flight. Look at the drone before you look at the screen.',set:'Cine mode · <b>4K 25p</b> · <b>1/50</b> · ND256 hard sun, ND64 soft, ND16 golden hour · WB 5600K · Normal colour · land at 30%.'},
+      {k:'go',mount:'Clip · bag strap, bag on the ground',what:'You flying. The behind-the-scenes shot the film can use.',set:'<b>4K25</b> · Auto · 50 Hz.'},
+      {k:'luna',mount:'In the bag',what:'Not used while you fly. Two hands on the remote.',set:'—'}],
+    alt:'No time for a full flight? Fly only the MUST shots: the forest to the horizon, the jeep from above, the dawn mist, and the pull-back from Nina.',warn:'Permission on paper. Animals first. Never fly during a recording.'};
+  BSET['d1-drone']=['drone']; BSET['d2-drone']=['drone']; BSET['r-drone']=['drone']; BSET['k-drone']=['drone'];
+
+  const BMAP = Object.fromEntries(BLOCKS.map(b=>[b[0],{name:b[1],hint:b[2],day:b[3],cam:b[4],set:b[5]}]));
+  const DNAME = Object.fromEntries(DAYS);
+
+  let db=null, docs=[], view=(()=>{try{const v=localStorage.getItem('qb.day'); return DNAME[v]?v:'d1'}catch(e){return 'd1'}})();
+  let hideDone=false, q='', sheetId=null, setupOpen=null;
+  let pics=(()=>{try{return localStorage.getItem('qb.pics')==='1'}catch(e){return false}})();
+  let mode=(()=>{try{const m=localStorage.getItem('qb.mode'); return m==='moments'||m==='drone'?m:'ask'}catch(e){return 'ask'}})();
+  const inMode=d=>mode==='drone'?isDrn(d):mode==='moments'?isMom(d):(!isMom(d)&&!isDrn(d));
+  const $=id=>document.getElementById(id);
+  const status=(t)=>{$('status').textContent=t||''};
+  const dayOf=d=>(BMAP[d.bucket]||{}).day||'m';
+
+  function render(){
+    const chips=$('chips'); chips.innerHTML='';
+    for(const [k,name] of DAYS){
+      const rows=docs.filter(d=>dayOf(d)===k&&inMode(d)); const done=rows.filter(d=>d.asked).length;
+      const c=document.createElement('button'); c.className='chip'+(view===k?' on':'')+(rows.length&&done===rows.length?' full':'');
+      c.innerHTML=esc(name)+' <span class="n">'+done+'/'+rows.length+'</span>';
+      c.onclick=()=>setView(k); chips.appendChild(c);
+    }
+    const dayRows=docs.filter(d=>dayOf(d)===view&&inMode(d)), total=dayRows.length, asked=dayRows.filter(d=>d.asked).length;
+    $('count').textContent=asked+' of '+total+(mode==='moments'?' moments caught':mode==='drone'?' drone shots done':' done today');
+    $('mAsk').setAttribute('aria-selected',String(mode==='ask'));
+    $('mMom').setAttribute('aria-selected',String(mode==='moments'));
+    const dAll=docs.filter(d=>dayOf(d)===view);
+    const a=dAll.filter(d=>!isMom(d)&&!isDrn(d)), mo=dAll.filter(d=>isMom(d)), dr=dAll.filter(d=>isDrn(d));
+    $('nAsk').textContent=a.filter(d=>d.asked).length+'/'+a.length;
+    $('nMom').textContent=mo.filter(d=>d.asked).length+'/'+mo.length;
+    $('nDrn').textContent=dr.length?dr.filter(d=>d.asked).length+'/'+dr.length:'';
+    $('mDrn').setAttribute('aria-selected',String(mode==='drone'));
+    $('bar').style.width=(total?100*asked/total:0)+'%';
+
+    const body=$('body'); body.innerHTML='';
+    let any=false;
+    if(mode==='moments' && !q){
+      const r=document.createElement('div'); r.className='rules';
+      r.innerHTML='<h3>How to catch a moment</h3><ol>'+
+        '<li><b>Switch on purpose.</b> After every Q&amp;A with Nina: 5 minutes in this tab. Cameras stay up. You stop asking. You watch.</li>'+
+        '<li><b>Never say cut.</b> Keep rolling 30 seconds after the last answer. People relax and say the true thing then.</li>'+
+        '<li><b>Far and long.</b> Fuji at 300 mm, or a GO Ultra she forgets. Faces before things.</li>'+
+        '<li><b>Ask her once, on day 1.</b> "The cameras will roll between questions. Say stop any time." She hates attention. Respect every stop.</li>'+
+        '</ol>';
+      body.appendChild(r);
+    }
+    if(mode==='drone' && !q){
+      const r=document.createElement('div'); r.className='rules drn';
+      r.innerHTML='<h3>How to fly, solo</h3><ol>'+
+        '<li><b>Carry the permission on paper.</b> Your phone is in the gate locker on safari. Fly only where the permission covers.</li>'+
+        '<li><b>Animals first.</b> Ask the guide before each launch. Never fly low over or toward an animal. If one reacts, climb and leave.</li>'+
+        '<li><b>Never during a recording.</b> The buzz ruins the sound. Fly between the Q&amp;As.</li>'+
+        '<li><b>One slow move per flight.</b> Cine mode. 5 seconds still at the start and the end. Two tries.</li>'+
+        '<li><b>Batteries:</b> 20–25 real minutes each. Land at 30%. MUST shots first, while you have power.</li>'+
+        '</ol>';
+      body.appendChild(r);
+    }
+    for(const b of BLOCKS){
+      if(b[3]!==view) continue;
+      const k=b[0], meta=BMAP[k];
+      let rows=docs.filter(d=>d.bucket===k&&inMode(d));
+      if(!rows.length && !(mode==='moments'&&/-moments$/.test(k)) && !(mode==='drone'&&/-drone$/.test(k)) && !(mode==='ask'&&!/-moments$|-shots$|arrival$|-drone$/.test(k))) continue;
+      if(mode!=='drone' && /-drone$/.test(k)) continue;
+      if(mode==='drone' && !/-drone$/.test(k)) continue;
+      if(hideDone) rows=rows.filter(d=>!d.asked);
+      if(q) rows=rows.filter(d=>(d.text+' '+(d.hint||'')+' '+(d.who||'')+' '+(d.note||'')+' '+(d.lines||'')).toLowerCase().includes(q));
+      if(q && !rows.length) continue;
+      rows.sort((a,b)=>(a.order||0)-(b.order||0));
+      any=true;
+      const blk=document.createElement('div'); blk.className='block';
+      blk.innerHTML='<div class="where">'+esc(meta.name)+'<small>'+esc(meta.hint)+'</small></div>'+
+        (meta.cam!=='—'||meta.set!=='—' ? '<div class="gear">'+(meta.cam!=='—'?'<b>Cam</b><span>'+esc(meta.cam)+'</span>':'')+(meta.set!=='—'?'<b>Set</b><span>'+esc(meta.set)+'</span>':'')+'</div>' : '');
+      const ss=BSET[k]||[];
+      if(ss.length){
+        const st=SETUPS[ss[0]];
+        blk.insertAdjacentHTML('beforeend','<div class="setrow">'+ss.map(id=>'<button type="button" class="setbtn" data-setup="'+id+'"><span class="dots">'+SETUPS[id].cams.map(c=>'<i class="dot" style="background:var('+CAM[c.k][1]+')"></i>').join('')+'</span>Setup'+(ss.length>1?': '+esc(SETUPS[id].name):'')+' ›</button>').join('')+'</div>'+
+          (pics&&st.hero?'<img class="setimg" src="'+st.hero+'" alt="Camera setup: '+esc(st.name)+'" loading="lazy" data-setup="'+ss[0]+'" tabindex="0">':''));
+        blk.querySelectorAll('[data-setup]').forEach(b=>{b.onclick=()=>{setupOpen=b.dataset.setup;renderSheet()}});
+      }
+      body.appendChild(blk);
+      const list=document.createElement('div'); list.className='list';
+      for(const d of rows) list.appendChild(row(d));
+      if(!rows.length){ const e=document.createElement('div'); e.className='empty'; e.textContent=hideDone?'All done here.':'Nothing here yet.'; list.appendChild(e); }
+      body.appendChild(list);
+      if(!q) body.appendChild(adder(k));
+    }
+    if(!any) body.innerHTML='<div class="empty">Nothing matches.</div>';
+    renderSheet();
+  }
+
+  function labelOf(d){
+    if(d.type==='drone') return d.rank==='must'?['Drone · MUST · '+(MOVES[d.move]||''),'must']:d.rank==='no'?['No fly','grey']:['Drone · '+(MOVES[d.move]||''),'drn'];
+    if(d.type==='ptc') return ['A-Roll','take'];
+    if(d.type==='shot') return ['Shot','grey'];
+    if(d.type==='moment') return ['Moment',''];
+    if(d.type==='task') return ['Do','grey'];
+    if(/^take/i.test(d.who||'')) return [d.who,'take'];
+    const w=d.who||'';
+    if(w && !/^(Verbatim|Object|Line|Saurabh|You say|Shot|Do|Moment)$/i.test(w) && !/^Q&A/.test(w)) return ['Q&A with '+w,''];
+    return [w, ''];
+  }
+
+  function row(d){
+    const el=document.createElement('div'); el.className='q'+(d.asked?' done':'')+(d.type==='ptc'?' ptc':'')+(d.type==='moment'?' moment':'')+(d.type==='drone'?' drone':''); el.dataset.id=d.id;
+    const [lab,cls]=labelOf(d);
+    el.innerHTML =
+      '<div class="box" role="checkbox" tabindex="0" aria-checked="'+(!!d.asked)+'">'+(d.asked?'✓':'')+'</div>'+
+      '<div class="t">'+(lab?'<div class="who '+cls+'">'+esc(lab)+'</div>':'')+
+        '<div>'+esc(d.text)+'</div>'+(d.hint?'<div class="h">'+esc(d.hint)+'</div>':'')+(d.note?'<div class="note">'+esc(d.note)+'</div>':'')+'</div>'+
+      '<div class="arrow" aria-hidden="true">›</div>';
+    el.querySelector('.box').onclick=()=>toggle(d);
+    el.querySelector('.box').onkeydown=e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();toggle(d)}};
+    el.querySelector('.t').onclick=()=>{sheetId=d.id;renderSheet()};
+    el.querySelector('.arrow').onclick=()=>{sheetId=d.id;renderSheet()};
+    return el;
+  }
+
+  function renderSheet(){
+    const root=$('sheetRoot'); root.innerHTML='';
+    if(setupOpen){ renderSetup(root); return; }
+    if(!sheetId) { document.body.style.overflow=''; return; }
+    const d=docs.find(x=>x.id===sheetId); if(!d){ sheetId=null; return; }
+    const meta=BMAP[d.bucket]||{name:d.bucket,hint:'',cam:'—',set:'—'};
+    const [lab,cls]=labelOf(d);
+    const cam=d.camera||meta.cam, set=d.settings||meta.set;
+    let h='<div class="veil"></div><div class="sheet" role="dialog" aria-modal="true">'+
+      '<div class="top"><div><span class="bk">'+esc(meta.name)+'</span>'+(lab?'<div class="lbl" style="color:var(--'+(cls==='take'?'take':cls==='grey'?'mute':'accent')+')">'+esc(lab)+'</div>':'')+'</div><button class="x" aria-label="Close">×</button></div>';
+    if(d.type==='ptc'){
+      h+='<div class="big">'+esc(d.text)+'</div>';
+      if(d.before) h+='<div class="before"><span class="lbl">Before this, the viewer hears</span>'+esc(d.before)+'</div>';
+      if(d.runin) h+='<div class="runin"><span class="lbl" style="font-family:var(--display);color:var(--mute)">Say this first, then roll</span>'+esc(d.runin)+'</div>';
+      if(d.lines) h+='<div class="say"><span class="lbl">Say this to camera</span>'+esc(d.lines)+'</div>';
+      if(d.next) h+='<div class="next"><span class="lbl">Next cut</span>'+esc(d.next)+'</div>';
+    } else if(d.type==='drone'){
+      h+='<div class="big">'+esc(d.text)+'</div>';
+      if(d.hint) h+='<div class="hint">'+esc(d.hint)+'</div>';
+      h+='<span class="lbl" style="margin-top:10px">The move · '+esc(MOVES[d.move]||'')+'</span><div class="mv">'+moveSvg(d.move)+'</div>';
+      if(d.lines) h+='<ol class="steps">'+d.lines.split('\n').map(x=>'<li>'+esc(x)+'</li>').join('')+'</ol>';
+    } else {
+      h+='<div class="big">'+esc(d.text)+'</div>';
+      if(d.hint) h+='<div class="hint">'+esc(d.hint)+'</div>';
+      if(d.lines) h+='<div class="say">'+esc(d.lines)+'</div>';
+    }
+    h+='<div class="hud"><span class="lbl">Camera</span>'+esc(cam)+'<br><span class="lbl" style="margin-top:8px">Settings</span>'+esc(set)+'</div>';
+    if(d.flag) h+='<div class="flag">'+esc(d.flag)+'</div>';
+    const rs=BSET[d.bucket]||[];
+    if(rs.length) h+='<div class="row">'+rs.map(id=>'<button class="btn ghost" data-setup="'+id+'">See setup'+(rs.length>1?': '+esc(SETUPS[id].name):'')+' ›</button>').join('')+'</div>';
+    h+='<div class="row"><button class="btn'+(d.asked?' done':'')+'" data-act="tick">'+(d.asked?'✓ Done':(d.type==='moment'?'Caught it':d.type==='drone'?'Got it':'Mark done'))+'</button><button class="btn ghost" data-act="close">Close</button></div>';
+    h+='<div class="edit"><label>Note<textarea id="sh-note" placeholder="What she said, what to follow up, what went wrong…">'+esc(d.note||'')+'</textarea></label>'+
+       '<label>Move to<select id="sh-mv">'+BLOCKS.map(b=>'<option value="'+b[0]+'"'+(b[0]===d.bucket?' selected':'')+'>'+esc(DNAME[b[3]]+' — '+b[1])+'</option>').join('')+'</select></label>'+
+       '<div class="row"><button class="btn" data-act="save">Save</button><button class="btn danger" data-act="del">Remove</button></div></div>';
+    h+='</div>';
+    root.innerHTML=h;
+    document.body.style.overflow='hidden';
+    const close=()=>{sheetId=null;renderSheet()};
+    root.querySelector('.veil').onclick=close;
+    root.querySelector('.x').onclick=close;
+    root.querySelector('[data-act=close]').onclick=close;
+    root.querySelector('[data-act=tick]').onclick=()=>toggle(d);
+    root.querySelectorAll('[data-setup]').forEach(b=>{b.onclick=()=>{setupOpen=b.dataset.setup;renderSheet()}});
+    root.querySelector('[data-act=save]').onclick=async()=>{
+      const bucket=$('sh-mv').value, note=$('sh-note').value.trim();
+      if(bucket!==d.bucket||note!==(d.note||'')) await write(d.id,{bucket,note});
+      close();
+    };
+    root.querySelector('[data-act=del]').onclick=async()=>{
+      const b=root.querySelector('[data-act=del]'); if(b.dataset.armed!=='1'){b.dataset.armed='1';b.textContent='Tap again to remove';return}
+      if(db){ try{ await db.doc('questions/'+d.id).delete(); status('Removed.'); }catch(e){ status('Could not remove.'); } }
+      docs=docs.filter(x=>x.id!==d.id); close(); render();
+    };
+  }
+
+  function renderSetup(root){
+    const st=SETUPS[setupOpen]; if(!st){ setupOpen=null; renderSheet(); return; }
+    const cams=st.cams.map(c=>'<div class="cam" style="--c:var('+CAM[c.k][1]+')"><div class="hd"><span class="nm">'+CAM[c.k][0]+'</span><span class="mt">'+esc(c.mount)+'</span></div><div class="what">'+esc(c.what)+'</div>'+(c.img?'<img src="'+c.img+'" alt="What the '+CAM[c.k][0]+' sees" loading="lazy">':'')+'<div class="set">'+c.set+'</div></div>').join('');
+    root.innerHTML='<div class="veil"></div><div class="sheet" role="dialog" aria-modal="true" aria-label="'+esc(st.name)+'">'+
+      '<div class="top"><div><span class="bk">Camera setup</span><div class="big" style="margin:2px 0 0">'+esc(st.name)+'</div></div><button class="x" aria-label="Close">×</button></div>'+
+      (st.hero?'<img class="hero" src="'+st.hero+'" alt="Behind-the-scenes reference"><p class="cap">'+esc(st.cap)+' The people are stand-ins.</p>':'')+
+      '<span class="lbl" style="margin-top:14px">From above</span><div class="map">'+st.map+'</div>'+
+      '<p class="cap">S = you · N = Nina · D, G = driver, guide. Each coloured fan is what that camera sees. Dashed = later.</p>'+
+      '<span class="lbl" style="margin-top:14px">Cameras · how each one hangs</span>'+cams+
+      '<div class="alt">'+esc(st.alt)+'</div><div class="warn">'+esc(st.warn)+'</div>'+
+      '<p class="solo">Solo rule: one tripod, only where you sit or stand still. Every other camera is in your hand, clipped to the bag, on a magnet, or standing on the bag.</p>'+
+      '<div class="row"><button class="btn ghost" data-act="close">'+(sheetId?'‹ Back':'Close')+'</button></div></div>';
+    document.body.style.overflow='hidden';
+    const close=()=>{setupOpen=null;renderSheet()};
+    root.querySelector('.veil').onclick=close; root.querySelector('.x').onclick=close; root.querySelector('[data-act=close]').onclick=close;
+  }
+
+  function adder(bucket){
+    const f=document.createElement('form'); f.className='add';
+    f.innerHTML='<input id="add-'+bucket+'" placeholder="'+(mode==='moments'?'Add a moment to watch for…':mode==='drone'?'Add a drone shot…':'Add a line here…')+'" aria-label="Add a line"><button class="btn" type="submit">Add</button>';
+    f.onsubmit=async e=>{
+      e.preventDefault(); const inp=f.querySelector('input'); const text=inp.value.trim(); if(!text) return;
+      const order=Math.max(0,...docs.filter(d=>d.bucket===bucket).map(d=>d.order||0))+1;
+      const id='u'+Date.now().toString(36);
+      const body=mode==='drone'?{text,bucket,order,who:'Drone',type:'drone',rank:'nice',move:'',asked:false,note:'',hint:'',source:'added on phone'}:mode==='moments'?{text,bucket,order,who:'Moment',type:'moment',asked:false,note:'',hint:'',source:'added on phone'}:{text,bucket,order,who:'Saurabh',type:'q',asked:false,note:'',hint:'',source:'added on phone'};
+      docs.push(Object.assign({id},body)); inp.value=''; render();
+      if(db){ try{ await db.doc('questions/'+id).set(body); status('Added.'); }catch(err){ status('Saved on this phone only. Not synced.'); } }
+    };
+    return f;
+  }
+
+  async function toggle(d){
+    const asked=!d.asked;
+    await write(d.id,{asked, asked_at: asked? new Date().toISOString() : ''});
+  }
+  async function write(id,patch){
+    const d=docs.find(x=>x.id===id); if(!d) return;
+    Object.assign(d,patch); render();
+    if(!db){ status('Not synced.'); return; }
+    try{ await db.doc('questions/'+id).update(patch); status(''); }
+    catch(e){ if(e&&e.code==='invalid_argument'){ status('Read-only for you.'); } else status('Could not save. Try again.'); }
+  }
+  function setView(k){ view=k; sheetId=null; setupOpen=null; try{localStorage.setItem('qb.day',k)}catch(e){} render(); window.scrollTo({top:0}); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  function setMode(m){ mode=m; sheetId=null; setupOpen=null; try{localStorage.setItem('qb.mode',m)}catch(e){} render(); window.scrollTo({top:0}); }
+  $('mAsk').onclick=()=>setMode('ask');
+  $('mMom').onclick=()=>setMode('moments');
+  $('mDrn').onclick=()=>setMode('drone');
+  $('search').oninput=e=>{q=e.target.value.trim().toLowerCase();render()};
+  $('hideDone').onchange=e=>{hideDone=e.target.checked;render()};
+  $('pics').checked=pics;
+  $('pics').onchange=e=>{pics=e.target.checked;try{localStorage.setItem('qb.pics',pics?'1':'0')}catch(_){}render()};
+  document.addEventListener('keydown',e=>{if(e.key!=='Escape')return; if(setupOpen){setupOpen=null;renderSheet()} else if(sheetId){sheetId=null;renderSheet()}});
+  render();
+
+  (async()=>{
+    db = await window.SB.db();
+    if(!db){ $('body').innerHTML='<div class="empty">The store did not open. Reload the page.</div>'; return; }
+    db.collection('questions').onSnapshot(snap=>{
+      docs = snap.docs.filter(s=>s.exists).map(s=>Object.assign({id:s.id}, s.data()));
+      render();
+    }, err=>{ status('Live sync stopped. Reload the page.'); });
+  })();
+})();
+</script>
+
+</body></html>
