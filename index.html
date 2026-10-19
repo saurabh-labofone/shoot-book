@@ -237,7 +237,7 @@
 
 <div class="wrap">
   <h1>Nina · Shoot Book</h1>
-  <p class="sub">Start with Most important. Ask tab: questions and your A-Roll. Moments tab: life between them. Tap a box when done. Tap the words for the full text. <b id="count">…</b> · <span id="status" class="status"></span></p>
+  <p class="sub">Today: Concert · 19 Oct. ★ = your mandatory questions. Ask tab: questions and your A-Roll. Moments tab: life between them. Tap a box when done. Tap the words for the full text. <b id="count">…</b> · <span id="status" class="status"></span></p>
 
   <div class="strip">
     <div class="mode" role="tablist" aria-label="Ask or Moments">
@@ -260,9 +260,9 @@
 <script>
 (function(){
   const DAYS = [
+    ["c19","Concert · 19 Oct"],
     ["must","Most important"],
     ["r","Rishikesh · 16–19"],
-    ["c","Concert · 19 Oct"],
     ["m","Must-get lines"],
   ];
   const SET_FUJI_PTC="Fuji on the tripod: 4K 25p · H.264 200 Mbps · Eterna · 1/50 · ISO 160 · WB 5600K · AF-C eye. GO Ultra in hand: 4K25 · Auto. Mic on you.";
@@ -281,6 +281,23 @@
   const DRONE_SET="Cine mode · 4K 25p · 1/50 · ND to hold 1/50 · WB 5600K locked · Normal colour so it cuts with the GO (D-Log M only on a Mini 4 Pro, and only if you grade) · under 120 m · land at 30%.";
   // key, name, hint, day, camera, settings
   const BLOCKS = [
+    ["c19-l-today","1 · Lunch · Nina · today","★ = your mandatory list, with your number. If lunch is short: Wall Street and tigers first.","c19","GO Ultra rolling on the table, forgotten. Luna 60 mm on her face from across the table.",MOM_SET],
+    ["c19-l-ws","1 · Lunch · Nina · Wall Street","You sit in a restaurant: ★4, the café, fits here.","c19","GO Ultra rolling on the table, forgotten. Luna 60 mm on her face from across the table.",MOM_SET],
+    ["c19-l-tiger","1 · Lunch · Nina · tigers","","c19","GO Ultra rolling on the table, forgotten. Luna 60 mm on her face from across the table.",MOM_SET],
+    ["c19-l-kd","1 · Lunch · Nina · Krishna Das and childhood","Move to a separate sit-down if lunch runs out.","c19","GO Ultra rolling on the table, forgotten. Luna 60 mm on her face from across the table.",MOM_SET],
+    ["c19-l-ma","1 · Lunch · Nina · Siddhi Ma","Move to a separate sit-down if lunch runs out.","c19","GO Ultra rolling on the table, forgotten. Luna 60 mm on her face from across the table.",MOM_SET],
+    ["c19-l-takes","1 · Lunch · Nina · quick takes","Read the line. Stop talking. Short answers.","c19","GO Ultra rolling on the table, forgotten. Luna 60 mm on her face from across the table.",MOM_SET],
+    ["c19-l-table","1 · Lunch · the table","","c19","GO Ultra rolling on the table, forgotten. Luna 60 mm on her face from across the table.",MOM_SET],
+    ["c19-v-nina","2 · Venue · Nina, before","","c19","Fuji on her. Luna 60 mm. iPhone wide.",SET_SIT],
+    ["c19-v-sarina","2 · Venue · Sarina","Film her phone or a post.","c19","Luna in your hand, 20 mm, on them. Mic on them.","Luna 4K25 · 1/50 · ND32 in sun. Quiet corner, away from the speakers."],
+    ["c19-v-others","2 · Venue · musicians, organiser, crew","Musicians at soundcheck. Organiser: the money answer is a fact check.","c19","Luna in your hand, 20 mm, on them. Mic on them.","Luna 4K25 · 1/50 · ND32 in sun. Quiet corner, away from the speakers."],
+    ["c19-before","3 · Just before she goes on","One question only. Then film the breath, the water, the look at the crowd.","c19","Luna 60 mm from a distance.","Luna 4K25 · ISO up to 1600."],
+    ["c19-after","4 · After the concert · Nina","First minute: ask nothing. A quiet place, when she is ready. ★29 and ★30 can wait for tomorrow if she is tired.","c19","Fuji on her. Luna 60 mm. iPhone wide.",SET_SIT],
+    ["c19-d-all","5 · Divya · everyone","Volunteers, Hanuman Dass, audience. Same words each time.","c19","Divya: phone or Luna, horizontal, mic close.","Before: “Can we film you? It is for a documentary.” After: “Can we use this in the film?” Get the yes on camera."],
+    ["c19-d-before","6 · Divya · audience, before","In the queue.","c19","Divya: phone or Luna, horizontal, mic close.","Before: “Can we film you? It is for a documentary.” After: “Can we use this in the film?” Get the yes on camera."],
+    ["c19-d-after","7 · Divya · audience, after","At the exit. Go fast.","c19","Divya: phone or Luna, horizontal, mic close.","Before: “Can we film you? It is for a documentary.” After: “Can we use this in the film?” Get the yes on camera."],
+    ["c19-d-vol","8 · Divya · Go Dharmic volunteers","Ask the everyone questions first. Never say Nina's name in the last one.","c19","Divya: phone or Luna, horizontal, mic close.","Before: “Can we film you? It is for a documentary.” After: “Can we use this in the film?” Get the yes on camera."],
+    ["c19-d-hd","9 · Divya · Hanuman Dass","Founder of Go Dharmic. Ask the everyone questions first. A quiet corner.","c19","Divya: phone or Luna, horizontal, mic close.","Before: “Can we film you? It is for a documentary.” After: “Can we use this in the film?” Get the yes on camera."],
     ["mi-ws","Nina · Wall Street and leaving","","must","Fuji on her. Luna 60 mm. iPhone wide.",SET_SIT],
     ["mi-wild","Nina · Wildlife and conservation","","must","Fuji on her. Luna 60 mm. iPhone wide.",SET_SIT],
     ["mi-kdlink","Nina · Krishna Das and the childhood connection","","must","Fuji on her. Luna 60 mm. iPhone wide.",SET_SIT],
@@ -325,7 +342,7 @@
     ["rishikesh-kd","Rishikesh · Q&A with KD","If KD is present. Else a separate pickup.","r","Fuji on him. Luna 60 mm. iPhone wide.",SET_SIT],
     ["rishikesh-sarina","Rishikesh · Q&A with Sarina","Her sister. Concert prep.","r","Fuji on her. Luna 20 mm wide.",SET_SIT],
     ["concert-day","Concert · Q&A with Nina","Backstage before. Quiet after.","c","Luna for backstage. Fuji on the tripod for the performance, full stretches, never fragments.","Performance: Fuji 4K25 · 1/50 · lock exposure · clean sound from the desk if they give it. Luna 4K25 handheld for faces."],
-    ["c-moments","Concert · moments to catch","Nerves before. The exhale after.","c",MOM_CAM,MOM_SET],
+    ["c-moments","Concert · moments to catch","Nerves before. The exhale after.","c19",MOM_CAM,MOM_SET],
     ["must-get","Must-get lines","Verbatim lines the edit needs on camera.","m","Whatever is running. Make sure a camera is on her face.","—"],
   ];
   /* ===== SETUPS: where each camera goes, how it hangs on you, what it sees ===== */
@@ -437,12 +454,13 @@
       {k:'luna',mount:'In the bag',what:'Not used while you fly. Two hands on the remote.',set:'—'}],
     alt:'No time for a full flight? Fly only the MUST shots: the forest to the horizon, the jeep from above, the dawn mist, and the pull-back from Nina.',warn:'Permission on paper. Animals first. Never fly during a recording.'};
   for(const k of ['mi-ws','mi-wild','mi-kdlink','mi-ma','mi-link','mi-kd','mi-naveen','mi-musician','mi-sarina','mi-uma','mi-sub-nina','mi-sub-kd']) BSET[k]=['sit_day']; BSET['mi-concert']=['concert'];
+  for(const k of ['c19-l-today','c19-l-ws','c19-l-tiger','c19-l-kd','c19-l-ma','c19-l-takes','c19-l-table']) BSET[k]=['moments']; for(const k of ['c19-v-nina','c19-after']) BSET[k]=['sit_day'];
   BSET['d1-drone']=['drone']; BSET['d2-drone']=['drone']; BSET['r-drone']=['drone']; BSET['k-drone']=['drone'];
 
   const BMAP = Object.fromEntries(BLOCKS.map(b=>[b[0],{name:b[1],hint:b[2],day:b[3],cam:b[4],set:b[5]}]));
   const DNAME = Object.fromEntries(DAYS);
 
-  let db=null, docs=[], view=(()=>{try{const v=localStorage.getItem('qb.day2'); return DNAME[v]?v:'must'}catch(e){return 'must'}})();
+  let db=null, docs=[], view=(()=>{try{const v=localStorage.getItem('qb.day3'); return DNAME[v]?v:'c19'}catch(e){return 'c19'}})();
   let hideDone=false, q='', sheetId=null, setupOpen=null;
   let pics=(()=>{try{return localStorage.getItem('qb.pics')==='1'}catch(e){return false}})();
   let mode=(()=>{try{const m=localStorage.getItem('qb.mode'); return m==='moments'?m:'ask'}catch(e){return 'ask'}})();
@@ -640,8 +658,10 @@
   }
 
   async function toggle(d){
-    const asked=!d.asked;
-    await write(d.id,{asked, asked_at: asked? new Date().toISOString() : ''});
+    const asked=!d.asked, patch={asked, asked_at: asked? new Date().toISOString() : ''};
+    const twins=docs.filter(x=>x.id!==d.id && ((d.mirror && x.id===d.mirror) || x.mirror===d.id));
+    await write(d.id,patch);
+    for(const t of twins) if(!!t.asked!==asked) await write(t.id,Object.assign({},patch));
   }
   async function write(id,patch){
     const d=docs.find(x=>x.id===id); if(!d) return;
@@ -650,7 +670,7 @@
     try{ await db.doc('questions/'+id).update(patch); status(''); }
     catch(e){ if(e&&e.code==='invalid_argument'){ status('Read-only for you.'); } else status('Could not save. Try again.'); }
   }
-  function setView(k){ view=k; sheetId=null; setupOpen=null; try{localStorage.setItem('qb.day2',k)}catch(e){} render(); window.scrollTo({top:0}); }
+  function setView(k){ view=k; sheetId=null; setupOpen=null; try{localStorage.setItem('qb.day3',k)}catch(e){} render(); window.scrollTo({top:0}); }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
   function setMode(m){ mode=m; sheetId=null; setupOpen=null; try{localStorage.setItem('qb.mode',m)}catch(e){} render(); window.scrollTo({top:0}); }
