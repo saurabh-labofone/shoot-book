@@ -10,6 +10,7 @@ self.addEventListener('fetch',e=>{
     e.respondWith(caches.open('sb-fonts').then(async c=>{const hit=await c.match(r); const net=fetch(r).then(res=>{if(res.ok||res.type==='opaque')c.put(r,res.clone());return res}).catch(()=>hit); return hit||net;})); return;
   }
   if(u.origin!==location.origin) return;
+  if(r.mode==='navigate' && !/\/(index\.html)?$/.test(u.pathname)) return; // other pages (for example divya.html) are plain pages
   if(r.mode==='navigate'){ // newest page when online, cached page when not
     // weak signal: wait 2.5 s for the network, then open the saved page at once
     const net=fetch(r).then(res=>{if(res.ok){const cp=res.clone(); caches.open(V).then(c=>c.put('index.html',cp));} return res});
